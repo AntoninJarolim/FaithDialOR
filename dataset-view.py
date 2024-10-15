@@ -17,6 +17,7 @@ fd_fixes_mapping = {
     "Let's see. If memory serves me correctly,  Hans Heinrich Josef Meyer  was a geographer and geologist from Germany who also climbed mountains and volcanic peaks?  ": 'Let\'s see. If memory serves me correctly,  Hans Heinrich Josef Meyer  was a geographer and geologist from Germany who also climbed mountains and volcanic peaks?  I hope that is correct.'
 }
 
+
 def download_faith_dial():
     for data_name in faith_dial_datafiles:
         hf_hub_download(
@@ -58,9 +59,79 @@ def try_find_knowledge_sent(knowledge_sent, wow_knowledge, diag):
                 return knowledge_key
 
 
-def create_ORFaithDial(split='train'):
+def find_in_hard_knowledge(knowledge_sentence, wow_hard_knowledge):
+    for k, v in wow_hard_knowledge.items():
+        if knowledge_sentence in v:
+            return True
+    return False
+
+
+def create_ORFaithDial(data_file, wow_knowledge, wow_hard_knowledge):
+    not_found = 0
+    found_in_other_utterances = 0
+    all_utterances = 0
+    found_knowledge_sent = 0
+    found_normally = 0
+    skip_key_error = 0
+
+    faith_dial_data = json.load(data_file)
+    for diag in tqdm(faith_dial_data):
+        for utt in diag['utterances']:
+            all_utterances += 1
+            knowledge_key = utt["original_response"]
+            knowledge_key = fd_fixes_mapping.get(knowledge_key, knowledge_key)
+
+            if knowledge_key is None:
+                knowledge_key = try_find_knowledge_sent(utt["knowledge"].strip(), wow_knowledge, diag)
+                if knowledge_key is None:
+                    found = find_in_hard_knowledge(utt["knowledge"], wow_hard_knowledge)
+                    if found:
+                        found_knowledge_sent += 1
+                        continue
+                else:
+                    found_in_other_utterances += 1
+            else:
+                found_normally += 1
+
+            if knowledge_key is None:
+                not_found += 1
+                if not_found < 10:
+                    print("'{}'".format(utt['knowledge']))
+                continue
+
+            try:
+                knowledge = wow_knowledge[knowledge_key]
+            except KeyError:
+                skip_key_error += 1
+                continue  # Skip this utterance
+
+            utt['passages'] = knowledge['retrieved_passages']
+            utt['topics'] = knowledge['retrieved_topics']
+            utt['checked_sentence'] = knowledge['checked_sentence']
+            utt['checked_passage'] = knowledge['checked_passage']
+
+            # todo check if utt['knowledge'] is in the retrieved passages
+
+    print(f"Out of {all_utterances} utterances:")
+    print(f"\tFound based on 'original_response': {found_normally}")
+    print(f"\tFound in other utterances: {found_in_other_utterances}")
+    print(f"\tFound sentence in all knowledge: {found_knowledge_sent}")
+    print(f"\tNot found anywhere: {not_found}")
+    if skip_key_error > 0:
+        print(f"\tSkipped because of KeyError: {skip_key_error}")
+
+    sum_found = found_normally + found_in_other_utterances + found_knowledge_sent
+    skip_sum = not_found + skip_key_error
+    assert all_utterances == sum_found + skip_sum
+
+    return faith_dial_data
+
+
+def load_wow_knowledge():
     # Replace 'filename.txt' with your actual file name
     wow_knowledge = {}
+    wow_hard_knowledge = {}
+
     with open(f'data/wizard_of_wikipedia/data.json', 'r') as file:
         for line in file:
             data = json.loads(line)
@@ -79,43 +150,59 @@ def create_ORFaithDial(split='train'):
                         'retrieved_topics': utt["retrieved_topics"],
                     }
 
-    skipped_because_none = 0
-    skipped = 0
-    skipped_but_found = 0
-    all = 0
-    with open(f'data/FaithDial/{split}.json', 'r') as file:
-        faith_dial_data = json.load(file)
-        for diag in tqdm(faith_dial_data):
-            for utt in diag['utterances']:
-                all += 1
-                knowledge_key = utt["original_response"]
-                knowledge_key = fd_fixes_mapping.get(knowledge_key, knowledge_key)
+                    for topic_dict in utt["retrieved_passages"]:
+                        for k, v in topic_dict.items():
+                            if k not in wow_hard_knowledge:
+                                wow_hard_knowledge[k] = [s.strip() for s in v]
 
-                if knowledge_key is None:
-                    knowledge_key = try_find_knowledge_sent(utt["knowledge"], wow_knowledge, diag)
-                    
-                try:
-                    knowledge = wow_knowledge[knowledge_key]
-                except KeyError:
-                    if knowledge_key is None:
-                        skipped_because_none += 1
-                    else:
-                        skipped += 1
-                    continue  # Skip this utterance
-                utt['passages'] = knowledge['retrieved_passages']
-                utt['topics'] = knowledge['retrieved_topics']
-                utt['checked_sentence'] = knowledge['checked_sentence']
-                utt['checked_passage'] = knowledge['checked_passage']
+    return wow_knowledge, wow_hard_knowledge
 
-                # todo check if utt['knowledge'] is in the retrieved passages
 
-    print(f"{skipped_because_none}+{skipped}/{all} skipped")
-    print(f"skipped_because_none + skipped / all skipped")
+def analyze_schema(file_path='data/wizard_of_wikipedia/train.json'):
+    # Function to extract the "schema" of a dictionary (the set of keys)
+    def extract_schema(d):
+        if isinstance(d, dict):
+            speaker = d['speaker'][2:]
+            d[speaker] = True
+            return frozenset(d.keys())
+        return None
 
-    with open(f'data/FaithDialOR/{split}.json', 'w') as file:
-        json.dump(faith_dial_data, file, indent=4)
+    # Analyze the JSON file and group dictionaries by their schema
+    def analyze_json_structure(file_path):
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+
+        # Assuming the JSON file is a list of dictionaries
+        schema_groups = defaultdict(list)
+
+        for i, diag in enumerate(data):
+            for item in diag["dialog"]:
+                schema = extract_schema(item)
+                if schema:
+                    schema_groups[schema].append(i)
+
+        return schema_groups
+
+    schemas = analyze_json_structure(file_path)
+
+    # Print the unique schemas and the number of dictionaries using each schema
+    for schema, indices in schemas.items():
+        print(f"Schema {sorted(list(schema))}: {len(indices)} dictionaries")
 
 
 if __name__ == '__main__':
+    import json
+    from collections import defaultdict
+
+    wow_knowledge, wow_hard_knowledge = load_wow_knowledge()
     # print_dialogue('data/wizard_of_wikipedia/data.json', 10)
-    create_ORFaithDial('train')
+    for split in ['test', 'train', 'valid']:
+        print(f"Processing {split}:")
+
+        with open(f'data/FaithDial/{split}.json', 'r') as file:
+            sadf = create_ORFaithDial(file, wow_knowledge, wow_hard_knowledge)
+
+        with open(f'data/FaithDialOR/{split}.json', 'w') as file:
+            json.dump(sadf, file, indent=4)
+
+        print()
